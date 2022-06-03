@@ -15,7 +15,7 @@
 // along with the snarkOS library. If not, see <https://www.gnu.org/licenses/>.
 
 use snarkos_environment::{
-    helpers::{BlockLocators, NodeType, State},
+    helpers::{BlockLocators, NodeType, Status},
     network::{Data, MessageCodec},
     Client,
     CurrentNetwork,
@@ -46,8 +46,7 @@ const DESIRED_CONNECTIONS: usize = <Client<CurrentNetwork>>::MINIMUM_NUMBER_OF_P
 
 pub const MAXIMUM_NUMBER_OF_PEERS: usize = <Client<CurrentNetwork>>::MAXIMUM_NUMBER_OF_PEERS;
 
-/// The test node; it consists of a `Node` that handles networking and `State`
-/// that can be extended freely based on test requirements.
+/// The test node; it contains a `SynthNode` with some custom behavior.
 #[derive(Clone)]
 pub struct TestNode(SynthNode);
 
@@ -76,7 +75,7 @@ impl TestNode {
 
         let pea2pea_node = Pea2PeaNode::new(Some(config)).await.unwrap();
         let client_state = Default::default();
-        let node = TestNode(SynthNode::new(pea2pea_node, client_state));
+        let node = TestNode::new(pea2pea_node, client_state);
         node.enable_disconnect().await;
         node.enable_handshake().await;
         node.enable_reading().await;
@@ -98,7 +97,7 @@ impl TestNode {
                 MESSAGE_VERSION,
                 MAXIMUM_FORK_DEPTH,
                 NodeType::Client,
-                State::Ready,
+                Status::Ready,
                 genesis.hash(),
                 Data::Object(genesis.header().clone()),
             );
@@ -153,7 +152,7 @@ impl Reading for TestNode {
                 debug!("Peer {} disconnected for the following reason: {:?}", source, reason);
             }
             ClientMessage::PeerRequest => self.process_peer_request(source).await?,
-            ClientMessage::PeerResponse(peer_addrs) => self.process_peer_response(source, peer_addrs).await?,
+            ClientMessage::PeerResponse(peer_addrs, _) => self.process_peer_response(source, peer_addrs).await?,
             ClientMessage::Ping(version, _fork_depth, _peer_type, _peer_state, _block_hash, block_header) => {
                 // Deserialise the block header.
                 let block_header = block_header.deserialize().await.unwrap();
@@ -176,7 +175,7 @@ impl Reading for TestNode {
 impl TestNode {
     async fn process_peer_request(&self, source: SocketAddr) -> io::Result<()> {
         let peers = self.state.peers.read().keys().copied().collect::<Vec<_>>();
-        let msg = ClientMessage::PeerResponse(peers);
+        let msg = ClientMessage::PeerResponse(peers, None);
         info!(parent: self.node().span(), "sending a PeerResponse to {}", source);
 
         self.send_direct_message(source, msg)?;

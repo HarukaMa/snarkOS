@@ -14,14 +14,23 @@
 // You should have received a copy of the GNU General Public License
 // along with the snarkOS library. If not, see <https://www.gnu.org/licenses/>.
 
-pub mod block_locators;
-pub use block_locators::*;
+use snarkos_environment::CurrentNetwork;
+use snarkos_storage::{storage::rocksdb::RocksDB, LedgerState};
+use snarkvm::dpc::traits::network::Network;
 
-mod node_type;
-pub use node_type::NodeType;
+#[test]
+#[ignore = "This can be run whenever a block dump is needed."]
+fn dump_blocks() {
+    // Compose the correct file path for the parameter file.
+    let mut source_path = aleo_std::aleo_dir();
+    source_path.push("storage");
+    source_path.push(format!("ledger-{}", CurrentNetwork::NETWORK_ID));
 
-mod resources;
-pub use resources::{Resource, Resources};
+    // The path to dump the blocks to.
+    let target_path = "./blocks.dump";
+    // The number of blocks to dump.
+    let num_blocks = 10;
 
-mod status;
-pub use status::{RawStatus, Status};
+    let (ledger, _) = LedgerState::<CurrentNetwork>::open_reader::<RocksDB, _>(source_path).unwrap();
+    ledger.dump_blocks(target_path, num_blocks).unwrap();
+}

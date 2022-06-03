@@ -15,7 +15,7 @@
 // along with the snarkOS library. If not, see <https://www.gnu.org/licenses/>.
 
 use crate::{
-    helpers::{BlockLocators, NodeType, State},
+    helpers::{BlockLocators, NodeType, Status},
     Environment,
 };
 use snarkvm::{dpc::posw::PoSWProof, prelude::*};
@@ -23,7 +23,7 @@ use snarkvm::{dpc::posw::PoSWProof, prelude::*};
 use ::bytes::{Buf, BufMut, Bytes, BytesMut};
 use anyhow::{bail, Result};
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
-use std::{io::Write, marker::PhantomData, net::SocketAddr};
+use std::{io::Write, marker::PhantomData, net::SocketAddr, time::Instant};
 use tokio::task;
 use tokio_util::codec::{Decoder, Encoder, LengthDelimitedCodec};
 
@@ -113,7 +113,7 @@ pub enum Message<N: Network, E: Environment> {
     /// BlockResponse := (block)
     BlockResponse(Data<Block<N>>),
     /// ChallengeRequest := (version, fork_depth, node_type, status, listener_port, nonce, cumulative_weight)
-    ChallengeRequest(u32, u32, NodeType, State, u16, u64, u128),
+    ChallengeRequest(u32, u32, NodeType, Status, u16, u64, u128),
     /// ChallengeResponse := (block_header)
     ChallengeResponse(Data<BlockHeader<N>>),
     /// Disconnect := ()
@@ -121,9 +121,9 @@ pub enum Message<N: Network, E: Environment> {
     /// PeerRequest := ()
     PeerRequest,
     /// PeerResponse := (\[peer_ip\])
-    PeerResponse(Vec<SocketAddr>),
+    PeerResponse(Vec<SocketAddr>, Option<Instant>),
     /// Ping := (version, fork_depth, node_type, status, block_hash, block_header)
-    Ping(u32, u32, NodeType, State, N::BlockHash, Data<BlockHeader<N>>),
+    Ping(u32, u32, NodeType, Status, N::BlockHash, Data<BlockHeader<N>>),
     /// Pong := (is_fork, block_locators)
     Pong(Option<bool>, Data<BlockLocators<N>>),
     /// UnconfirmedBlock := (block_height, block_hash, block)
@@ -210,7 +210,7 @@ impl<N: Network, E: Environment> Message<N, E> {
             Self::ChallengeResponse(block_header) => Ok(block_header.serialize_blocking_into(writer)?),
             Self::Disconnect(reason) => Ok(bincode::serialize_into(writer, reason)?),
             Self::PeerRequest => Ok(()),
-            Self::PeerResponse(peer_ips) => Ok(bincode::serialize_into(writer, peer_ips)?),
+            Self::PeerResponse(peer_ips, _) => Ok(bincode::serialize_into(writer, peer_ips)?),
             Self::Ping(version, fork_depth, node_type, status, block_hash, block_header) => {
                 bincode::serialize_into(&mut *writer, &(version, fork_depth, node_type, status, block_hash))?;
                 block_header.serialize_blocking_into(writer)
@@ -298,7 +298,7 @@ impl<N: Network, E: Environment> Message<N, E> {
                 true => Self::PeerRequest,
                 false => bail!("Invalid 'PeerRequest' message"),
             },
-            6 => Self::PeerResponse(bincode::deserialize_from(&mut bytes.reader())?),
+            6 => Self::PeerResponse(bincode::deserialize_from(&mut bytes.reader())?, None),
             7 => {
                 let mut reader = bytes.reader();
                 let (version, fork_depth, node_type, status, block_hash) = bincode::deserialize_from(&mut reader)?;

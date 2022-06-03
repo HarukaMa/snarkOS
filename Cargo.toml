@@ -59,7 +59,7 @@ version = "0.8"
 version = "1"
 
 [dependencies.self_update]
-version = "0.28"
+version = "0.30"
 features = [
   "archive-zip",
   "compression-zip-bzip2",
@@ -111,11 +111,15 @@ version = "0.3"
 features = [ "env-filter", "parking_lot" ]
 
 [dependencies.tui]
-version = "0.17"
+version = "0.18"
 optional = true
 
 [dev-dependencies.rusty-hook]
 version = "0.11"
+
+[dev-dependencies.snarkos]
+path = "."
+features = [ "test" ] # a workaround to use the `test` feature in tests by default
 
 [profile.release]
 opt-level = 3
@@ -133,8 +137,7 @@ incremental = true
 debug-assertions = false
 
 [profile.dev]
-opt-level = 3
-lto = "thin"
+opt-level = 0
 incremental = true
 debug-assertions = false
 

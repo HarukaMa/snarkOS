@@ -23,7 +23,7 @@ pub mod helpers;
 #[cfg(feature = "network")]
 pub mod network;
 
-use crate::helpers::{NodeType, Resources, Status};
+use crate::helpers::{NodeType, RawStatus, Resources};
 use snarkvm::dpc::Network;
 
 use once_cell::sync::OnceCell;
@@ -115,9 +115,9 @@ pub trait Environment: 'static + Clone + Debug + Default + Send + Sync {
     }
 
     /// Returns the status of the node.
-    fn status() -> &'static Status {
-        static STATUS: OnceCell<Status> = OnceCell::new();
-        STATUS.get_or_init(Status::new)
+    fn status() -> &'static RawStatus {
+        static STATUS: OnceCell<RawStatus> = OnceCell::new();
+        STATUS.get_or_init(RawStatus::default)
     }
 
     /// Returns the terminator bit for the prover.
@@ -268,5 +268,18 @@ impl<N: Network> Environment for ProverTrial<N> {
     ];
     const MINIMUM_NUMBER_OF_PEERS: usize = 1;
     const MAXIMUM_NUMBER_OF_PEERS: usize = 21;
+    const COINBASE_IS_PUBLIC: bool = true;
+}
+
+#[derive(Clone, Debug, Default)]
+pub struct TestEnvironment<N: Network>(PhantomData<N>);
+
+#[rustfmt::skip]
+impl<N: Network> Environment for TestEnvironment<N> {
+    type Network = N;
+    const NODE_TYPE: NodeType = NodeType::Prover;
+    const SYNC_NODES: &'static [&'static str] = &[];
+    const MINIMUM_NUMBER_OF_PEERS: usize = 1;
+    const MAXIMUM_NUMBER_OF_PEERS: usize = 5;
     const COINBASE_IS_PUBLIC: bool = true;
 }

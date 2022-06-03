@@ -15,8 +15,8 @@
 // along with the snarkOS library. If not, see <https://www.gnu.org/licenses/>.
 
 use crate::{initialize_rpc_server, rpc_trait::RpcFunctions, RpcContext};
-use snarkos_environment::{helpers::State, Client, CurrentNetwork, Environment};
-use snarkos_network::{ledger::Ledger, Operator, Peers, Prover};
+use snarkos_environment::{helpers::Status, Client, CurrentNetwork, Environment};
+use snarkos_network::{ledger::Ledger, Operator, Peers, Prover, State};
 use snarkos_storage::{
     storage::{rocksdb::RocksDB, Storage},
     LedgerState,
@@ -31,7 +31,7 @@ use jsonrpsee::{
     core::{client::ClientT, Error as JsonrpseeError},
     http_client::{HttpClient, HttpClientBuilder},
     rpc_params,
-    types::error::METHOD_NOT_FOUND_CODE,
+    types::error::{CallError, METHOD_NOT_FOUND_CODE},
 };
 use rand::{thread_rng, Rng, SeedableRng};
 use rand_chacha::ChaChaRng;
@@ -42,6 +42,7 @@ use std::{
     fs,
     net::SocketAddr,
     path::{Path, PathBuf},
+    sync::Arc,
 };
 
 fn temp_dir() -> std::path::PathBuf {
@@ -56,6 +57,20 @@ fn new_ledger_state<N: Network, S: Storage, P: AsRef<Path>>(path: Option<P>) -> 
     }
 }
 
+/// Returns a single test block.
+fn test_block() -> Block<CurrentNetwork> {
+    let mut test_block_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    test_block_path.push("..");
+    test_block_path.push("storage");
+    test_block_path.push("benches");
+    // note: the `blocks_1` file was generated on a testnet2 storage using `LedgerState::dump_blocks`.
+    test_block_path.push("blocks_1");
+
+    let test_blocks = fs::read(test_block_path).unwrap_or_else(|_| panic!("Missing the test blocks file"));
+    let mut blocks: Vec<Block<CurrentNetwork>> = bincode::deserialize(&test_blocks).expect("Failed to deserialize a block dump");
+    blocks.pop().unwrap()
+}
+
 async fn new_rpc_context<N: Network, E: Environment, S: Storage, P: AsRef<Path>>(path: P) -> RpcContext<N, E> {
     let username = "root".to_string();
     let password = "pass".to_string();
@@ -64,56 +79,37 @@ async fn new_rpc_context<N: Network, E: Environment, S: Storage, P: AsRef<Path>>
     let node_addr: SocketAddr = "127.0.0.1:8888".parse().expect("Failed to parse ip");
 
     // Initialize the status indicator.
-    E::status().update(State::Ready);
+    E::status().update(Status::Ready);
 
     // Derive the storage paths.
     let (ledger_path, prover_path, operator_storage_path) = (path.as_ref().to_path_buf(), temp_dir(), temp_dir());
 
+    let state = Arc::new(State::new(node_addr, None));
+
     // Initialize a new instance for managing peers.
-    let peers = Peers::new(node_addr, None).await;
+    let (peers, peers_handler) = Peers::new(None, state.clone()).await;
 
     // Initialize a new instance for managing the ledger.
-    let ledger = Ledger::<N, E>::open::<S, _>(&ledger_path, peers.router())
+    let (ledger, ledger_handler) = Ledger::<N, E>::open::<S, _>(&ledger_path, state.clone())
         .await
         .expect("Failed to initialize ledger");
 
     // Initialize a new instance for managing the prover.
-    let prover = Prover::open::<S, _>(
-        &prover_path,
-        None,
-        node_addr,
-        Some(node_addr),
-        peers.router(),
-        ledger.reader(),
-        ledger.router(),
-    )
-    .await
-    .expect("Failed to initialize prover");
+    let (prover, prover_handler) = Prover::open::<S, _>(&prover_path, Some(node_addr), state.clone())
+        .await
+        .expect("Failed to initialize prover");
 
     // Initialize a new instance for managing the operator.
-    let operator = Operator::open::<RocksDB, _>(
-        &operator_storage_path,
-        None,
-        node_addr,
-        prover.memory_pool(),
-        peers.router(),
-        ledger.reader(),
-        ledger.router(),
-        prover.router(),
-    )
-    .await
-    .expect("Failed to initialize operator");
+    let (operator, operator_handler) = Operator::open::<RocksDB, _>(&operator_storage_path, state.clone())
+        .await
+        .expect("Failed to initialize operator");
 
-    RpcContext::new(
-        username,
-        password,
-        None,
-        peers,
-        ledger.reader(),
-        operator,
-        prover.router(),
-        prover.memory_pool(),
-    )
+    state.initialize_peers(peers, peers_handler).await;
+    state.initialize_ledger(ledger, ledger_handler).await;
+    state.initialize_prover(prover, prover_handler).await;
+    state.initialize_operator(operator, operator_handler).await;
+
+    RpcContext::new(username, password, None, state.clone())
 }
 
 /// Initializes a new instance of the rpc.
@@ -148,12 +144,11 @@ async fn test_handle_rpc() {
     let response: Result<serde_json::Value, _> = rpc_client.request("", None).await;
 
     // Expect an error response.
-    if let Err(JsonrpseeError::Request(error)) = response {
+    if let Err(JsonrpseeError::Call(CallError::Custom(err))) = response {
         // Verify the error code.
-        let json: serde_json::Value = serde_json::from_str(&error).expect("The response is not valid JSON");
-        assert!(json["error"]["code"] == METHOD_NOT_FOUND_CODE);
+        assert!(err.code() == METHOD_NOT_FOUND_CODE);
     } else {
-        panic!("Should have received an error response");
+        panic!("Should have received an error response, got {:?}", response);
     }
 }
 
@@ -261,20 +256,11 @@ async fn test_get_blocks() {
     // Initialize an empty ledger.
     let ledger_state = LedgerState::open_writer::<RocksDB, _>(directory.clone()).expect("Failed to initialize ledger");
 
-    // Read the test blocks; note: they don't include the genesis block, as it's always available when creating a ledger.
-    // note: the `blocks_1` file was generated on a testnet2 storage using `LedgerState::dump_blocks`.
-    let mut test_block_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-    test_block_path.push("..");
-    test_block_path.push("storage");
-    test_block_path.push("benches");
-    test_block_path.push("blocks_1");
-
-    let test_blocks = fs::read(test_block_path).unwrap_or_else(|_| panic!("Missing the test blocks file"));
-
-    let blocks: Vec<Block<CurrentNetwork>> = bincode::deserialize(&test_blocks).expect("Failed to deserialize a block dump");
+    // Read a single test block.
+    let test_block = test_block();
 
     // Load a test block into the ledger.
-    ledger_state.add_next_block(&blocks[0]).expect("Failed to add a test block");
+    ledger_state.add_next_block(&test_block).expect("Failed to add a test block");
 
     // Drop the handle to ledger_state. Note this does not remove the blocks in the temporary directory.
     drop(ledger_state);
@@ -289,7 +275,7 @@ async fn test_get_blocks() {
     let response: Vec<Block<CurrentNetwork>> = rpc_client.request("getblocks", params).await.expect("Invalid response");
 
     // Check the blocks.
-    assert_eq!(response, vec![CurrentNetwork::genesis_block().clone(), blocks[0].clone()]);
+    assert_eq!(response, vec![CurrentNetwork::genesis_block().clone(), test_block]);
 }
 
 #[tokio::test]
@@ -328,20 +314,11 @@ async fn test_get_block_hashes() {
     // Initialize an empty ledger.
     let ledger_state = LedgerState::open_writer::<RocksDB, _>(directory.clone()).expect("Failed to initialize ledger");
 
-    // Read the test blocks; note: they don't include the genesis block, as it's always available when creating a ledger.
-    // note: the `blocks_1` file was generated on a testnet2 storage using `LedgerState::dump_blocks`.
-    let mut test_block_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-    test_block_path.push("..");
-    test_block_path.push("storage");
-    test_block_path.push("benches");
-    test_block_path.push("blocks_1");
-
-    let test_blocks = fs::read(test_block_path).unwrap_or_else(|_| panic!("Missing the test blocks file"));
-
-    let blocks: Vec<Block<CurrentNetwork>> = bincode::deserialize(&test_blocks).expect("Failed to deserialize a block dump");
+    // Read a single test block.
+    let test_block = test_block();
 
     // Load a test block into the ledger.
-    ledger_state.add_next_block(&blocks[0]).expect("Failed to add a test block");
+    ledger_state.add_next_block(&test_block).expect("Failed to add a test block");
 
     // Drop the handle to ledger_state. Note this does not remove the blocks in the temporary directory.
     drop(ledger_state);
@@ -357,7 +334,7 @@ async fn test_get_block_hashes() {
         rpc_client.request("getblockhashes", params).await.expect("Invalid response");
 
     // Check the block hashes.
-    assert_eq!(response, vec![CurrentNetwork::genesis_block().hash(), blocks[0].hash()]);
+    assert_eq!(response, vec![CurrentNetwork::genesis_block().hash(), test_block.hash()]);
 }
 
 #[tokio::test]

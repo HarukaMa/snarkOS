@@ -19,6 +19,10 @@ edition = "2021"
 [features]
 test = [ "anyhow", "clap", "snarkos", "peak_alloc", "snarkos-metrics", "tracing-subscriber" ]
 
+[dev-dependencies.snarkos-integration]
+path = "."
+features = [ "test" ] # a workaround to use the `test` feature in tests by default
+
 [dependencies.anyhow]
 version = "1"
 optional = true
@@ -27,7 +31,7 @@ optional = true
 version = "0.1"
 
 [dependencies.pea2pea]
-version = "0.35"
+version = "0.37"
 
 [dependencies.peak_alloc]
 version = "0.1"

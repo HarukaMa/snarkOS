@@ -14,30 +14,23 @@
 // You should have received a copy of the GNU General Public License
 // along with the snarkOS library. If not, see <https://www.gnu.org/licenses/>.
 
-use crate::{
-    ConnectionResult,
-    LedgerReader,
-    LedgerRequest,
-    LedgerRouter,
-    OperatorRequest,
-    OperatorRouter,
-    PeersRequest,
-    PeersRouter,
-    ProverRequest,
-    ProverRouter,
-};
+use crate::{ConnectionResult, LedgerRequest, OperatorRequest, PeersRequest, ProverRequest, State};
 use snarkos_environment::{
-    helpers::{NodeType, State, Status},
+    helpers::{NodeType, Status},
     network::{Data, DisconnectReason, Message, MessageCodec},
     Environment,
 };
 use snarkvm::dpc::prelude::*;
+
+#[cfg(any(feature = "test", feature = "prometheus"))]
+use snarkos_metrics as metrics;
 
 use anyhow::{anyhow, bail, Result};
 use futures::SinkExt;
 use std::{
     collections::HashMap,
     net::SocketAddr,
+    sync::Arc,
     time::{Duration, Instant, SystemTime},
 };
 use tokio::{net::TcpStream, sync::mpsc, task, time::timeout};
@@ -82,21 +75,16 @@ pub(crate) struct Peer<N: Network, E: Environment> {
 
 impl<N: Network, E: Environment> Peer<N, E> {
     /// Create a new instance of `Peer`.
-    async fn new(
-        stream: TcpStream,
-        local_ip: SocketAddr,
-        local_nonce: u64,
-        peers_router: &PeersRouter<N, E>,
-        ledger_reader: &LedgerReader<N>,
-        connected_nonces: &[u64],
-    ) -> Result<Self> {
+    async fn new(stream: TcpStream, local_nonce: u64, connected_nonces: &[u64], state: &State<N, E>) -> Result<Self> {
         // Construct the socket.
         let mut outbound_socket = Framed::new(stream, Default::default());
+
+        let ledger_reader = state.ledger().reader();
 
         // Perform the handshake before proceeding.
         let (peer_ip, peer_nonce, node_type, status) = Peer::handshake(
             &mut outbound_socket,
-            local_ip,
+            state.local_ip,
             local_nonce,
             ledger_reader.latest_cumulative_weight(),
             connected_nonces,
@@ -119,7 +107,9 @@ impl<N: Network, E: Environment> Peer<N, E> {
         let (outbound_router, outbound_handler) = mpsc::channel(1024);
 
         // Add an entry for this `Peer` in the connected peers.
-        peers_router
+        state
+            .peers()
+            .router()
             .send(PeersRequest::PeerConnected(peer_ip, peer_nonce, outbound_router))
             .await?;
 
@@ -226,7 +216,7 @@ impl<N: Network, E: Environment> Peer<N, E> {
                         // If this node is a sync node, the peer is not a sync node and is syncing, and the peer is ahead, proceed to disconnect.
                         if E::NODE_TYPE == NodeType::Sync
                             && node_type != NodeType::Sync
-                            && peer_status == State::Syncing
+                            && peer_status == Status::Syncing
                             && peer_cumulative_weight > local_cumulative_weight
                         {
                             // Send the disconnect message.
@@ -264,11 +254,7 @@ impl<N: Network, E: Environment> Peer<N, E> {
                         trace!("Sending '{}-B' to {}", message.name(), peer_ip);
                         outbound_socket.send(message).await?;
 
-                        // Initialize a status variable.
-                        let status = Status::new();
-                        status.update(peer_status);
-
-                        (peer_nonce, node_type, status)
+                        (peer_nonce, node_type, peer_status)
                     }
                     Message::Disconnect(reason) => {
                         bail!("Peer {} disconnected for the following reason: {:?}", peer_ip, reason);
@@ -319,23 +305,18 @@ impl<N: Network, E: Environment> Peer<N, E> {
     #[allow(clippy::too_many_arguments)]
     pub(super) async fn handler(
         stream: TcpStream,
-        local_ip: SocketAddr,
         local_nonce: u64,
-        peers_router: &PeersRouter<N, E>,
-        ledger_reader: LedgerReader<N>,
-        ledger_router: LedgerRouter<N>,
-        prover_router: ProverRouter<N>,
-        operator_router: OperatorRouter<N>,
         connected_nonces: Vec<u64>,
         connection_result: Option<ConnectionResult>,
+        state: Arc<State<N, E>>,
     ) {
-        let peers_router = peers_router.clone();
+        let peers_router = state.peers().router().clone();
 
         // Procure a resource id to register the task with, as it might be terminated at any point in time.
         let peer_resource_id = E::resources().procure_id();
         E::resources().register_task(Some(peer_resource_id), task::spawn(async move {
             // Register our peer with state which internally sets up some channels.
-            let mut peer = match Peer::new(stream, local_ip, local_nonce, &peers_router, &ledger_reader, &connected_nonces).await {
+            let mut peer = match Peer::new(stream, local_nonce, &connected_nonces, &state).await {
                 Ok(peer) => {
                     // If the optional connection result router is given, report a successful connection result.
                     if let Some(router) = connection_result {
@@ -431,6 +412,13 @@ impl<N: Network, E: Environment> Peer<N, E> {
 
                                     is_ready_to_send
                                 }
+                                Message::PeerResponse(_, _rtt_start) => {
+                                    // Stop the clock on internal RTT.
+                                    #[cfg(any(feature = "test", feature = "prometheus"))]
+                                    metrics::histogram!(metrics::internal_rtt::PEER_REQUEST, _rtt_start.expect("rtt should be present with metrics enabled").elapsed());
+
+                                    true
+                                }
                                 _ => true,
                             };
                             // Send the message if it is ready.
@@ -457,26 +445,33 @@ impl<N: Network, E: Environment> Peer<N, E> {
                                     peer.last_seen = Instant::now();
                                 }
                             }
+
+                            #[cfg(any(feature = "test", feature = "prometheus"))]
+                            let rtt_start = Instant::now();
+
                             // Process the message.
                             trace!("Received '{}' from {}", message.name(), peer_ip);
                             match message {
                                 Message::BlockRequest(start_block_height, end_block_height) => {
+                                    #[cfg(any(feature = "test", feature = "prometheus"))]
+                                    metrics::increment_counter!(metrics::message_counts::BLOCK_REQUEST);
+
                                     // Ensure the request is within the accepted limits.
                                     let number_of_blocks = end_block_height.saturating_sub(start_block_height);
                                     if number_of_blocks > E::MAXIMUM_BLOCK_REQUEST {
                                         // Route a `Failure` to the ledger.
                                         let failure = format!("Attempted to request {} blocks", number_of_blocks);
-                                        if let Err(error) = ledger_router.send(LedgerRequest::Failure(peer_ip, failure)).await {
+                                        if let Err(error) = state.ledger().router().send(LedgerRequest::Failure(peer_ip, failure)).await {
                                             warn!("[Failure] {}", error);
                                         }
                                         continue;
                                     }
                                     // Retrieve the requested blocks.
-                                    let blocks = match ledger_reader.get_blocks(start_block_height, end_block_height) {
+                                    let blocks = match state.ledger().reader().get_blocks(start_block_height, end_block_height) {
                                         Ok(blocks) => blocks,
                                         Err(error) => {
                                             // Route a `Failure` to the ledger.
-                                            if let Err(error) = ledger_router.send(LedgerRequest::Failure(peer_ip, format!("{}", error))).await {
+                                            if let Err(error) = state.ledger().router().send(LedgerRequest::Failure(peer_ip, format!("{}", error))).await {
                                                 warn!("[Failure] {}", error);
                                             }
                                             continue;
@@ -490,8 +485,15 @@ impl<N: Network, E: Environment> Peer<N, E> {
                                             break;
                                         }
                                     }
+
+                                    // Stop the clock on internal RTT.
+                                    #[cfg(any(feature = "test", feature = "prometheus"))]
+                                    metrics::histogram!(metrics::internal_rtt::BLOCK_REQUEST, rtt_start.elapsed());
                                 },
                                 Message::BlockResponse(block) => {
+                                    #[cfg(any(feature = "test", feature = "prometheus"))]
+                                    metrics::increment_counter!(metrics::message_counts::BLOCK_RESPONSE);
+
                                     // Perform the deferred non-blocking deserialization of the block.
                                     match block.deserialize().await {
                                         Ok(block) => {
@@ -506,12 +508,12 @@ impl<N: Network, E: Environment> Peer<N, E> {
                                             }
 
                                             // Route the `BlockResponse` to the ledger.
-                                            if let Err(error) = ledger_router.send(LedgerRequest::BlockResponse(peer_ip, block, prover_router.clone())).await {
+                                            if let Err(error) = state.ledger().router().send(LedgerRequest::BlockResponse(peer_ip, block)).await {
                                                 warn!("[BlockResponse] {}", error);
                                             }
                                         },
                                         // Route the `Failure` to the ledger.
-                                        Err(error) => if let Err(error) = ledger_router.send(LedgerRequest::Failure(peer_ip, format!("{}", error))).await {
+                                        Err(error) => if let Err(error) = state.ledger().router().send(LedgerRequest::Failure(peer_ip, format!("{}", error))).await {
                                             warn!("[Failure] {}", error);
                                         }
                                     }
@@ -522,22 +524,41 @@ impl<N: Network, E: Environment> Peer<N, E> {
                                     break;
                                 },
                                 Message::Disconnect(reason) => {
+                                    #[cfg(any(feature = "test", feature = "prometheus"))]
+                                    metrics::increment_counter!(metrics::message_counts::DISCONNECT);
+
                                     debug!("Peer {} disconnected for the following reason: {:?}", peer_ip, reason);
                                     break;
                                 },
                                 Message::PeerRequest => {
+                                    #[cfg(any(feature = "test", feature = "prometheus"))]
+                                    metrics::increment_counter!(metrics::message_counts::PEER_REQUEST);
+
+                                    // Unfortunately can't be feature-flagged because of the enum
+                                    // it's passed around in.
+                                    let _rtt_start_instant: Option<Instant> = None;
+
+                                    #[cfg(any(feature = "test", feature = "prometheus"))]
+                                    let _rtt_start_instant = Some(rtt_start);
+
                                     // Send a `PeerResponse` message.
-                                    if let Err(error) = peers_router.send(PeersRequest::SendPeerResponse(peer_ip)).await {
+                                    if let Err(error) = peers_router.send(PeersRequest::SendPeerResponse(peer_ip, _rtt_start_instant)).await {
                                         warn!("[PeerRequest] {}", error);
                                     }
                                 }
-                                Message::PeerResponse(peer_ips) => {
+                                Message::PeerResponse(peer_ips, _) => {
+                                    #[cfg(any(feature = "test", feature = "prometheus"))]
+                                    metrics::increment_counter!(metrics::message_counts::PEER_RESPONSE);
+
                                     // Adds the given peer IPs to the list of candidate peers.
                                     if let Err(error) = peers_router.send(PeersRequest::ReceivePeerResponse(peer_ips)).await {
                                         warn!("[PeerResponse] {}", error);
                                     }
                                 }
                                 Message::Ping(version, fork_depth, node_type, status, block_hash, block_header) => {
+                                    #[cfg(any(feature = "test", feature = "prometheus"))]
+                                    metrics::increment_counter!(metrics::message_counts::PING);
+
                                     // Ensure the message protocol version is not outdated.
                                     if version < E::MESSAGE_VERSION {
                                         warn!("Dropping {} on version {} (outdated)", peer_ip, version);
@@ -555,7 +576,7 @@ impl<N: Network, E: Environment> Peer<N, E> {
                                             if E::NODE_TYPE != NodeType::Sync
                                                 && E::status().is_syncing()
                                                 && node_type == NodeType::Sync
-                                                && ledger_reader.latest_cumulative_weight() > block_header.cumulative_weight()
+                                                && state.ledger().reader().latest_cumulative_weight() > block_header.cumulative_weight()
                                             {
                                                 trace!("Disconnecting from {} (ahead of sync node)", peer_ip);
                                                 break;
@@ -582,15 +603,20 @@ impl<N: Network, E: Environment> Peer<N, E> {
                                     // Update the node type of the peer.
                                     peer.node_type = node_type;
                                     // Update the status of the peer.
-                                    peer.status.update(status);
+                                    peer.status = status;
 
                                     // Determine if the peer is on a fork (or unknown).
-                                    let is_fork = match ledger_reader.get_block_hash(peer.block_height) {
+                                    let is_fork = match state.ledger().reader().get_block_hash(peer.block_height) {
                                         Ok(expected_block_hash) => Some(expected_block_hash != block_hash),
                                         Err(_) => None,
                                     };
+
+                                    // Stop the clock on internal RTT.
+                                    #[cfg(any(feature = "test", feature = "prometheus"))]
+                                    metrics::histogram!(metrics::internal_rtt::PING, rtt_start.elapsed());
+
                                     // Send a `Pong` message to the peer.
-                                    if let Err(error) = peer.send(Message::Pong(is_fork, Data::Object(ledger_reader.latest_block_locators()))).await {
+                                    if let Err(error) = peer.send(Message::Pong(is_fork, Data::Object(state.ledger().reader().latest_block_locators()))).await {
                                         warn!("[Pong] {}", error);
                                     }
 
@@ -605,22 +631,32 @@ impl<N: Network, E: Environment> Peer<N, E> {
                                     }
                                 },
                                 Message::Pong(is_fork, block_locators) => {
+                                    #[cfg(any(feature = "test", feature = "prometheus"))]
+                                    metrics::increment_counter!(metrics::message_counts::PONG);
+
+                                    // Unfortunately can't be feature-flagged because of the enum
+                                    // it's passed around in.
+                                    let _rtt_start_instant: Option<Instant> = None;
+
+                                    #[cfg(any(feature = "test", feature = "prometheus"))]
+                                    let _rtt_start_instant = Some(rtt_start);
+
                                     // Perform the deferred non-blocking deserialization of block locators.
                                     let request = match block_locators.deserialize().await {
                                         // Route the `Pong` to the ledger.
-                                        Ok(block_locators) => LedgerRequest::Pong(peer_ip, peer.node_type, peer.status.get(), is_fork, block_locators),
+                                        Ok(block_locators) => LedgerRequest::Pong(peer_ip, peer.node_type, peer.status, is_fork, block_locators, _rtt_start_instant),
                                         // Route the `Failure` to the ledger.
                                         Err(error) => LedgerRequest::Failure(peer_ip, format!("{}", error)),
                                     };
 
                                     // Route the request to the ledger.
-                                    if let Err(error) = ledger_router.send(request).await {
+                                    if let Err(error) = state.ledger().router().send(request).await {
                                         warn!("[Pong] {}", error);
                                     }
 
                                     // Spawn an asynchronous task for the `Ping` request.
                                     let peers_router = peers_router.clone();
-                                    let ledger_reader = ledger_reader.clone();
+                                    let ledger_reader = state.ledger().reader().clone();
                                     // Procure a resource id to register the task with, as it might be terminated at any point in time.
                                     let ping_resource_id = E::resources().procure_id();
                                     E::resources().register_task(Some(ping_resource_id), task::spawn(async move {
@@ -641,6 +677,9 @@ impl<N: Network, E: Environment> Peer<N, E> {
                                     }));
                                 }
                                 Message::UnconfirmedBlock(block_height, block_hash, block) => {
+                                    #[cfg(any(feature = "test", feature = "prometheus"))]
+                                    metrics::increment_counter!(metrics::message_counts::UNCONFIRMED_BLOCK);
+
                                     // Drop the peer, if they have sent more than 5 unconfirmed blocks in the last 5 seconds.
                                     let frequency = peer.seen_inbound_blocks.values().filter(|t| t.elapsed().unwrap().as_secs() <= 5).count();
                                     if frequency >= 10 {
@@ -662,7 +701,7 @@ impl<N: Network, E: Environment> Peer<N, E> {
                                     // Ensure the unconfirmed block is at least within 2 blocks of the latest block height,
                                     // and no more that 2 blocks ahead of the latest block height.
                                     // If it is stale, skip the routing of this unconfirmed block to the ledger.
-                                    let latest_block_height = ledger_reader.latest_block_height();
+                                    let latest_block_height = state.ledger().reader().latest_block_height();
                                     let lower_bound = latest_block_height.saturating_sub(2);
                                     let upper_bound = latest_block_height.saturating_add(20);
                                     let is_within_range = block_height >= lower_bound && block_height <= upper_bound;
@@ -679,7 +718,7 @@ impl<N: Network, E: Environment> Peer<N, E> {
                                             // Ensure the claimed block height and block hash matches in the deserialized block.
                                             Ok(block) => match block_height == block.height() && block_hash == block.hash() {
                                                 // Route the `UnconfirmedBlock` to the ledger.
-                                                true => LedgerRequest::UnconfirmedBlock(peer_ip, block, prover_router.clone()),
+                                                true => LedgerRequest::UnconfirmedBlock(peer_ip, block),
                                                 // Route the `Failure` to the ledger.
                                                 false => LedgerRequest::Failure(peer_ip, "Malformed UnconfirmedBlock message".to_string())
                                             },
@@ -688,12 +727,15 @@ impl<N: Network, E: Environment> Peer<N, E> {
                                         };
 
                                         // Route the request to the ledger.
-                                        if let Err(error) = ledger_router.send(request).await {
+                                        if let Err(error) = state.ledger().router().send(request).await {
                                             warn!("[UnconfirmedBlock] {}", error);
                                         }
                                     }
                                 }
                                 Message::UnconfirmedTransaction(transaction) => {
+                                    #[cfg(any(feature = "test", feature = "prometheus"))]
+                                    metrics::increment_counter!(metrics::message_counts::UNCONFIRMED_TRANSACTION);
+
                                     // Drop the peer, if they have sent more than 500 unconfirmed transactions in the last 5 seconds.
                                     let frequency = peer.seen_inbound_transactions.values().filter(|t| t.elapsed().unwrap().as_secs() <= 5).count();
                                     if frequency >= 500 {
@@ -724,7 +766,7 @@ impl<N: Network, E: Environment> Peer<N, E> {
                                                 trace!("Skipping 'UnconfirmedTransaction {}' from {}", transaction.transaction_id(), peer_ip);
                                             } else {
                                                 // Route the `UnconfirmedTransaction` to the prover.
-                                                if let Err(error) = prover_router.send(ProverRequest::UnconfirmedTransaction(peer_ip, transaction)).await {
+                                                if let Err(error) = state.prover().router().send(ProverRequest::UnconfirmedTransaction(peer_ip, transaction)).await {
                                                     warn!("[UnconfirmedTransaction] {}", error);
 
                                                 }
@@ -737,7 +779,7 @@ impl<N: Network, E: Environment> Peer<N, E> {
                                 Message::PoolRegister(address) => {
                                     if E::NODE_TYPE != NodeType::Operator {
                                         trace!("Skipping 'PoolRegister' from {}", peer_ip);
-                                    } else if let Err(error) = operator_router.send(OperatorRequest::PoolRegister(peer_ip, address)).await {
+                                    } else if let Err(error) = state.operator().router().send(OperatorRequest::PoolRegister(peer_ip, address)).await {
                                         warn!("[PoolRegister] {}", error);
                                     }
                                 }
@@ -745,7 +787,7 @@ impl<N: Network, E: Environment> Peer<N, E> {
                                     if E::NODE_TYPE != NodeType::Prover {
                                         trace!("Skipping 'PoolRequest' from {}", peer_ip);
                                     } else if let Ok(block_template) = block_template.deserialize().await {
-                                        if let Err(error) = prover_router.send(ProverRequest::PoolRequest(peer_ip, share_difficulty, block_template)).await {
+                                        if let Err(error) = state.prover().router().send(ProverRequest::PoolRequest(peer_ip, share_difficulty, block_template)).await {
                                             warn!("[PoolRequest] {}", error);
                                         }
                                     } else {
@@ -756,7 +798,7 @@ impl<N: Network, E: Environment> Peer<N, E> {
                                     if E::NODE_TYPE != NodeType::Operator {
                                         trace!("Skipping 'PoolResponse' from {}", peer_ip);
                                     } else if let Ok(proof) = proof.deserialize().await {
-                                        if let Err(error) = operator_router.send(OperatorRequest::PoolResponse(peer_ip, address, nonce, proof)).await {
+                                        if let Err(error) = state.operator().router().send(OperatorRequest::PoolResponse(peer_ip, address, nonce, proof)).await {
                                             warn!("[PoolResponse] {}", error);
                                         }
                                     } else {
@@ -767,7 +809,7 @@ impl<N: Network, E: Environment> Peer<N, E> {
                                     if E::NODE_TYPE != NodeType::Operator {
                                         trace!("Skipping 'PoolBlock' from {}", peer_ip);
                                     } else if let Ok(proof) = proof.deserialize().await {
-                                        if let Err(error) = operator_router.send(OperatorRequest::PoolBlock(nonce, proof)).await {
+                                        if let Err(error) = state.operator().router().send(OperatorRequest::PoolBlock(nonce, proof)).await {
                                             warn!("[PoolBlock] {}", error);
                                         }
                                     } else {
@@ -787,7 +829,7 @@ impl<N: Network, E: Environment> Peer<N, E> {
 
             // When this is reached, it means the peer has disconnected.
             // Route a `Disconnect` to the ledger.
-            if let Err(error) = ledger_router
+            if let Err(error) = state.ledger().router()
                 .send(LedgerRequest::Disconnect(peer_ip, DisconnectReason::PeerHasDisconnected))
                 .await
             {
