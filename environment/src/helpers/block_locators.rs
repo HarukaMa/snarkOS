@@ -127,7 +127,12 @@ impl<N: Network> FromBytes for BlockLocators<N> {
 
         let block_locators = block_headers_bytes
             .into_par_iter()
-            .map(|(height, hash, bytes)| (height, (hash, bytes.map(|bytes| BlockHeader::<N>::read_le(&bytes[..]).unwrap()))))
+            .map(|(height, hash, bytes)| {
+                (
+                    height,
+                    (hash, bytes.map(|bytes| BlockHeader::<N>::read_le_unchecked(&bytes[..]).unwrap())),
+                )
+            })
             .collect::<BTreeMap<_, (_, _)>>();
 
         Self::from(block_locators).map_err(|error| Error::new(ErrorKind::Other, error))
