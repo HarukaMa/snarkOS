@@ -348,5 +348,9 @@ fn create_rpc_module<N: Network, E: Environment>(rpc_context: RpcContext<N, E>) 
             .await
     })?;
 
+    module.register_async_method("clearmempool", |_rpc_params, rpc_context| async move {
+        Ok(rpc_context.clear_mempool().await.map_err(JsonrpseeError::to_call_error)?)
+    })?;
+
     Ok(module)
 }

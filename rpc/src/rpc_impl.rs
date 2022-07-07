@@ -308,6 +308,19 @@ impl<N: Network, E: Environment> RpcFunctions<N> for RpcContext<N, E> {
         Ok(block_header_root)
     }
 
+    async fn clear_mempool(&self) -> Result<bool, RpcError> {
+        self.state
+            .prover()
+            .router()
+            .send(ProverRequest::MemoryPoolClear(None))
+            .await
+            .map_err(|error| {
+                warn!("[MemoryPoolClear] {}", error);
+                RpcError::Message(error.to_string())
+            })?;
+        Ok(true)
+    }
+
     // /// Returns the current mempool and sync information known by this node.
     // async fn get_block_template(&self) -> Result<BlockTemplate, RpcError> {
     //     let canon = self.storage.canon().await?;

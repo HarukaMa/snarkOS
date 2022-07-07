@@ -107,6 +107,8 @@ pub trait RpcFunctions<N: Network> {
     async fn get_mined_block_info(&self, height: u32, block_hash: N::BlockHash) -> Result<serde_json::Value, RpcError>;
 
     async fn get_block_header_root(&self, block_height: u32) -> Result<N::BlockHeaderRoot, RpcError>;
+
+    async fn clear_mempool(&self) -> Result<bool, RpcError>;
 }
 
 // /// Definition of private RPC endpoints that require authentication.
