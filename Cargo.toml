@@ -37,7 +37,7 @@ task-metrics = [ "snarkos-environment/task-metrics" ]
 test = [ "snarkos-metrics/test", "snarkos-network/test" ]
 
 [dependencies.aleo-std]
-version = "0.1.12"
+version = "0.1.14"
 
 [dependencies.anyhow]
 version = "1"
@@ -46,7 +46,7 @@ version = "1"
 version = "2.0"
 
 [dependencies.crossterm]
-version = "0.23"
+version = "0.24"
 optional = true
 
 [dependencies.num_cpus]
@@ -94,7 +94,7 @@ git = "https://github.com/HarukaMa/snarkVM"
 branch = "unchecked"
 
 [dependencies.clap]
-version = "3.1"
+version = "3.2"
 features = [ "derive" ]
 
 [dependencies.thiserror]
@@ -120,6 +120,9 @@ version = "0.11"
 [dev-dependencies.snarkos]
 path = "."
 features = [ "test" ] # a workaround to use the `test` feature in tests by default
+
+[build-dependencies.walkdir]
+version = "2"
 
 [profile.release]
 opt-level = 3

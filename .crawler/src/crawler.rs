@@ -32,6 +32,7 @@ use clap::Parser;
 use pea2pea::{
     protocols::{Disconnect, Handshake, Reading, Writing},
     Config,
+    ConnectionSide,
     Node as Pea2PeaNode,
     Pea2Pea,
 };
@@ -51,7 +52,7 @@ pub struct StorageClient;
 #[derive(Debug, Parser)]
 pub struct Opts {
     /// Specify the IP address and port for the node server.
-    #[clap(long = "addr", short = 'a', parse(try_from_str), default_value = "0.0.0.0:4132")]
+    #[clap(long, short, default_value = "0.0.0.0:4132", action)]
     pub addr: SocketAddr,
     #[cfg(feature = "postgres")]
     #[clap(flatten)]
@@ -289,7 +290,7 @@ impl Reading for Crawler {
     type Codec = CrawlerDecoder<Client<CurrentNetwork>>;
     type Message = InboundMessage;
 
-    fn codec(&self, addr: SocketAddr) -> Self::Codec {
+    fn codec(&self, addr: SocketAddr, _side: ConnectionSide) -> Self::Codec {
         Self::Codec::new(addr, self.node().span().clone())
     }
 
