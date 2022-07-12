@@ -408,12 +408,6 @@ impl<N: Network, A: StorageAccess> LedgerState<N, A> {
         Ok(true)
     }
 
-    pub fn invalidate_coinbase_cache(&self) {
-        let mut w = self.coinbase_cache.write();
-        *w = (None, None);
-        info!("Coinbase cache invalidated");
-    }
-
     /// Returns a block template based on the latest state of the ledger.
     pub fn get_block_template<R: Rng + CryptoRng>(
         &self,
@@ -493,18 +487,8 @@ impl<N: Network, A: StorageAccess> LedgerState<N, A> {
         // Calculate the final coinbase reward (including the transaction fees).
         coinbase_reward = coinbase_reward.add(transaction_fees);
 
-        let coinbase: (Transaction<N>, Record<N>);
-
-        if self.coinbase_cache.read().0.is_none() {
-            coinbase = Transaction::<N>::new_coinbase(recipient, coinbase_reward, is_public, rng)?;
-            let mut w = self.coinbase_cache.write();
-            *w = (Some(coinbase.0.clone()), Some(coinbase.1.clone()));
-            info!("Created new coinbase transaction {}", coinbase.0.transaction_id());
-        } else {
-            let cache = self.coinbase_cache.read().clone();
-            coinbase = (cache.0.unwrap(), cache.1.unwrap());
-            info!("Using cached coinbase transaction {}", coinbase.0.transaction_id());
-        }
+        let coinbase = Transaction::<N>::new_coinbase(recipient, coinbase_reward, is_public, rng)?;
+        info!("Created new coinbase transaction {}", coinbase.0.transaction_id());
 
         transactions.push(coinbase.0);
 
@@ -790,7 +774,7 @@ impl<N: Network, A: StorageReadWrite> LedgerState<N, A> {
     /// a read-only instance of `LedgerState` may only call immutable methods.
     ///
     pub fn open_writer<S: Storage<Access = A>, P: AsRef<Path>>(path: P) -> Result<Self> {
-        Self::open_writer_with_increment::<S, P>(path, 10_000)
+        Self::open_writer_with_increment::<S, P>(path, 500_000)
     }
 
     /// This function is hidden, as it's intended to be used directly in tests only.
