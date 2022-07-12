@@ -488,7 +488,7 @@ impl<N: Network, A: StorageAccess> LedgerState<N, A> {
         coinbase_reward = coinbase_reward.add(transaction_fees);
 
         let coinbase = Transaction::<N>::new_coinbase(recipient, coinbase_reward, is_public, rng)?;
-        info!("Created new coinbase transaction {}", coinbase.0.transaction_id());
+        info!("Created new coinbase transaction {} {}", block_height, coinbase.0.transaction_id());
 
         transactions.push(coinbase.0);
 
