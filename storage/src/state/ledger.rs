@@ -76,6 +76,8 @@ pub struct LedgerState<N: Network, A: StorageAccess> {
     ledger_roots: DataMap<N::LedgerRoot, u32, A>,
     /// The blocks of the ledger in storage.
     blocks: BlockState<N, A>,
+    /// Coinbase cache.
+    coinbase_cache: RwLock<(Option<Transaction<N>>, Option<Record<N>>)>,
 }
 
 impl<N: Network, A: StorageAccess> LedgerState<N, A> {
