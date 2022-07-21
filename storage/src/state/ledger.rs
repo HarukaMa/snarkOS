@@ -101,6 +101,7 @@ impl<N: Network, A: StorageAccess> LedgerState<N, A> {
             latest_block_locators: Default::default(),
             ledger_roots: storage.open_map(MapId::LedgerRoots)?,
             blocks: BlockState::open(storage)?,
+            coinbase_cache: RwLock::new((None, None)),
         });
 
         // Determine the latest block height.
@@ -792,7 +793,7 @@ impl<N: Network, A: StorageReadWrite> LedgerState<N, A> {
     /// a read-only instance of `LedgerState` may only call immutable methods.
     ///
     pub fn open_writer<S: Storage<Access = A>, P: AsRef<Path>>(path: P) -> Result<Self> {
-        Self::open_writer_with_increment::<S, P>(path, 10_000)
+        Self::open_writer_with_increment::<S, P>(path, 500_000)
     }
 
     /// This function is hidden, as it's intended to be used directly in tests only.
@@ -812,6 +813,7 @@ impl<N: Network, A: StorageReadWrite> LedgerState<N, A> {
             latest_block_locators: Default::default(),
             ledger_roots: storage.open_map(MapId::LedgerRoots)?,
             blocks: BlockState::open(storage)?,
+            coinbase_cache: RwLock::new((None, None)),
         };
 
         // Determine the latest block height.
