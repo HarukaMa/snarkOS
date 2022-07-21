@@ -298,6 +298,7 @@ impl<N: Network, E: Environment> Operator<N, E> {
                     ) {
                         if let Ok(block) = Block::from(previous_block_hash, block_header, transactions) {
                             info!("Operator has found unconfirmed block {} ({})", block.height(), block.hash());
+                            self.state.ledger().reader().invalidate_coinbase_cache();
                             let request = LedgerRequest::UnconfirmedBlock(self.state.local_ip, block);
                             if let Err(error) = self.state.ledger().router().send(request).await {
                                 warn!("Failed to broadcast mined block - {}", error);
@@ -322,6 +323,7 @@ impl<N: Network, E: Environment> Operator<N, E> {
                         if let Ok(block) = Block::from(previous_block_hash, block_header, transactions) {
                             info!("Operator has found unconfirmed block {} ({})", block.height(), block.hash());
                             let request = LedgerRequest::UnconfirmedBlock(self.state.local_ip, block);
+                            self.state.ledger().reader().invalidate_coinbase_cache();
                             if let Err(error) = self.state.ledger().router().send(request).await {
                                 warn!("Failed to broadcast mined block - {}", error);
                             }
