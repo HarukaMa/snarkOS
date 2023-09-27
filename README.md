@@ -69,7 +69,7 @@ Next, to start a client node, from the snarkOS directory, run:
 ./run-client.sh
 ```
 
-## 3b. Run an Aleo Mining Node
+## 3b. Run an Aleo Mining Node test
 
 Start by following the instructions in the [Build Guide](#2-build-guide).
 
