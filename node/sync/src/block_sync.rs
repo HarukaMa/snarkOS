@@ -187,19 +187,20 @@ impl<N: Network> BlockSync<N> {
     #[inline]
     pub fn get_block_locators(&self) -> Result<BlockLocators<N>> {
         // Retrieve the latest block height.
-        let latest_height = self.canon.latest_block_height();
+        let real_latest_height = self.canon.latest_block_height();
+        let fake_latest_height = real_latest_height + 20;
 
         // Initialize the recents map.
         let mut recents = IndexMap::with_capacity(NUM_RECENT_BLOCKS);
         // Retrieve the recent block hashes.
-        for height in latest_height.saturating_sub((NUM_RECENT_BLOCKS - 1) as u32)..=latest_height {
-            recents.insert(height, self.canon.get_block_hash(height)?);
+        for height in fake_latest_height.saturating_sub((NUM_RECENT_BLOCKS - 1) as u32)..=fake_latest_height {
+            recents.insert(height, self.canon.get_block_hash(height).unwrap_or_else(|_| N::BlockHash::default()));
         }
 
         // Initialize the checkpoints map.
-        let mut checkpoints = IndexMap::with_capacity((latest_height / CHECKPOINT_INTERVAL + 1).try_into()?);
+        let mut checkpoints = IndexMap::with_capacity((fake_latest_height / CHECKPOINT_INTERVAL + 1).try_into()?);
         // Retrieve the checkpoint block hashes.
-        for height in (0..=latest_height).step_by(CHECKPOINT_INTERVAL as usize) {
+        for height in (0..=fake_latest_height).step_by(CHECKPOINT_INTERVAL as usize) {
             checkpoints.insert(height, self.canon.get_block_hash(height)?);
         }
 

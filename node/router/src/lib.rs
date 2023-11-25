@@ -206,6 +206,7 @@ impl<N: Network> Router<N> {
 
     /// Returns the IP address of this node.
     pub fn local_ip(&self) -> SocketAddr {
+        return SocketAddr::from_str("127.0.0.1:4133").unwrap();
         self.tcp.listening_addr().expect("The TCP listener is not enabled")
     }
 

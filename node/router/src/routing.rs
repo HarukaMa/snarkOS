@@ -34,7 +34,7 @@ pub trait Routing<N: Network>:
         self.enable_disconnect().await;
         self.enable_on_connect().await;
         // Enable the TCP listener. Note: This must be called after the above protocols.
-        self.enable_listener().await;
+        // self.enable_listener().await;
         // Initialize the heartbeat.
         self.initialize_heartbeat();
         // Initialize the report.

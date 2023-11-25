@@ -176,7 +176,7 @@ impl<N: Network, C: ConsensusStorage<N>> Inbound<N> for Client<N, C> {
             Ok(blocks) => Data::Object(DataBlocks(blocks)),
             Err(error) => {
                 error!("Failed to retrieve blocks {start_height} to {end_height} from the ledger - {error}");
-                return false;
+                return true; // ignore the request.
             }
         };
         // Send the `BlockResponse` message to the peer.
