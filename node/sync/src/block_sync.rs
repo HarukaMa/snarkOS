@@ -25,7 +25,7 @@ use anyhow::{bail, ensure, Result};
 use indexmap::{IndexMap, IndexSet};
 use itertools::Itertools;
 use parking_lot::RwLock;
-use rand::{prelude::IteratorRandom, CryptoRng, Rng};
+use rand::{prelude::IteratorRandom, CryptoRng, Rng, SeedableRng};
 use std::{
     collections::BTreeMap,
     net::{IpAddr, Ipv4Addr, SocketAddr},
@@ -35,6 +35,7 @@ use std::{
     },
     time::Instant,
 };
+use snarkvm::utilities::Uniform;
 
 pub const REDUNDANCY_FACTOR: usize = 3;
 const EXTRA_REDUNDANCY_FACTOR: usize = REDUNDANCY_FACTOR * 2;
@@ -194,7 +195,10 @@ impl<N: Network> BlockSync<N> {
         let mut recents = IndexMap::with_capacity(NUM_RECENT_BLOCKS);
         // Retrieve the recent block hashes.
         for height in fake_latest_height.saturating_sub((NUM_RECENT_BLOCKS - 1) as u32)..=fake_latest_height {
-            recents.insert(height, self.canon.get_block_hash(height).unwrap_or_else(|_| N::BlockHash::default()));
+            recents.insert(height, self.canon.get_block_hash(height).unwrap_or_else(|_| {
+                let mut rng = rand::rngs::SmallRng::seed_from_u64(height as u64);
+                N::BlockHash::rand(&mut rng)
+            }));
         }
 
         // Initialize the checkpoints map.

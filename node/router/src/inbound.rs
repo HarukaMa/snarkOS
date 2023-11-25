@@ -211,6 +211,7 @@ pub trait Inbound<N: Network>: Reading + Outbound<N> {
                 if message.solution_id != solution.commitment() {
                     bail!("Peer '{peer_ip}' is not following the 'UnconfirmedSolution' protocol")
                 }
+                trace!("{:?} {}", solution.to_target(), solution.address());
                 // Handle the unconfirmed solution.
                 match self.unconfirmed_solution(peer_ip, serialized, solution).await {
                     true => Ok(()),
@@ -265,9 +266,9 @@ pub trait Inbound<N: Network>: Reading + Outbound<N> {
     /// Handles a `PeerResponse` message.
     fn peer_response(&self, _peer_ip: SocketAddr, peers: &[SocketAddr]) -> bool {
         // Filter out invalid addresses.
-        let peers = peers.iter().copied().filter(|ip| self.router().is_valid_peer_ip(ip)).collect::<Vec<_>>();
+        // let peers = peers.iter().copied().filter(|ip| self.router().is_valid_peer_ip(ip)).collect::<Vec<_>>();
         // Adds the given peer IPs to the list of candidate peers.
-        self.router().insert_candidate_peers(&peers);
+        // self.router().insert_candidate_peers(&peers);
         true
     }
 

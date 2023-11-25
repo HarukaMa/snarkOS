@@ -38,6 +38,7 @@ version = "0.12"
 
 [dependencies.rand]
 version = "0.8"
+features = ["small_rng"]
 
 [dependencies.serde]
 version = "1"
